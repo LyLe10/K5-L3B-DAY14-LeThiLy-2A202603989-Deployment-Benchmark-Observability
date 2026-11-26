@@ -2029,3 +2029,10 @@ Trong quá trình thực hiện bài lab, tôi sử dụng ChatGPT và Codex v�
 Tôi trực tiếp thực hiện các kiểm thử trong Part 1, Part 2, Part 4 và quá trình cloud deployment trong Part 3. Đối với Part 5 và Part 6, Codex được sử dụng để thực hiện phần lớn công việc kỹ thuật theo phạm vi và yêu cầu đã xác định.
 
 Các kết quả PASS, FAIL, WARNING và những trường hợp chưa được kiểm thử được ghi nhận theo bằng chứng thực tế. Những kết luận từ phân tích mã nguồn được phân biệt với kết quả runtime testing. Các nội dung do AI hỗ trợ nhưng chưa được kiểm chứng độc lập cũng được ghi rõ trong từng phần của AI Log.
+
+### Part 7 — Agent Benchmark (CP7)
+
+- **Yêu cầu hỗ trợ:** Thực hiện Exercise 7.1–7.3 theo yêu cầu K5. Đo metrics và kiểm thử histogram mới, chạy load test và eval local, sửa knowledge base theo bằng chứng, thêm CI quality gate và lưu kết quả nghiệm thu.
+- **Kết quả hỗ trợ từ AI:** Codex đối chiếu hướng dẫn với mã nguồn, bổ sung histogram, chạy kiểm thử trên hai agent mock, lưu JSON gốc do các script xuất ra và tổng hợp kết quả trong [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md). Dựa trên `missing_keywords` của v2, Codex thêm hai mục kiến thức về JWT và Kubernetes HPA rồi chạy lại eval.
+- **Công việc trực tiếp thực hiện:** Tôi xác định phạm vi CP7, tiêu chí nghiệm thu và các ràng buộc thực hiện. Codex thực hiện thay đổi mã nguồn, các phép đo local và tổng hợp bằng chứng. Tôi chưa xác minh độc lập toàn bộ kết quả.
+- **Điều chỉnh sau review:** Dùng đủ ba mức slow rate theo CHECKPOINTS.md và lưu JSON tại `reports/` ở gốc theo SUBMISSION.md. Giữ ngưỡng SLO mặc định và kết quả exit 1 của các lượt vi phạm. Kiểm tra gate 85% bằng lệnh local trên v2 đã sửa và v1 để quan sát cả exit 0 và exit 1. Trạng thái GitHub Actions chưa được xác minh. Phần CP8 để pending.
