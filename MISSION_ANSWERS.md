@@ -491,6 +491,57 @@ Redis có 0 key trước bộ test và 0 key sau bộ test. Redis PING sau test 
 `docker stop k5-day14-cp3-redis` trả exit code 0 và container được xóa tự động. Không còn container Docker đang chạy. Các cổng 8000, 6379 và 16379 đều trống trong WSL. Image `redis:7-alpine` vẫn còn với ID `7f7d30b7fdd0`. Không chủ động xóa volume nào đã có của lab. Lần chạy `git diff --check` trong đợt cleanup trả exit code 0.
 
 
+## Part 5: Scaling & Reliability
+
+### Exercise 5.1: Health checks — PASS
+
+Chạy app develop bằng Python 3.12.3 trong WSL với FastAPI 0.115.0, Uvicorn 0.30.0 và psutil 6.0.0. Hai probe sau startup đều trả **HTTP 200**:
+
+| Endpoint | Response thực tế |
+| --- | --- |
+| GET /health | `{"status":"ok","uptime_seconds":1.0,"version":"1.0.0","environment":"development","timestamp":"2026-11-26T09:37:49.554534+00:00","checks":{"memory":{"status":"ok","used_percent":35.3}}}` |
+| GET /ready | `{"ready":true,"in_flight_requests":1}` |
+
+Liveness cho biết tiến trình còn phục vụ được probe. Readiness cho biết app đã sẵn sàng nhận công việc. App develop bật cờ sau bước khởi tạo mô phỏng và dùng cờ để trả 200 hoặc 503. Middleware đếm cả request probe đang chạy. Nhánh 503 của develop được đối chiếu từ source, chưa kiểm thử qua HTTP. [Health](05-scaling-reliability/develop/app.py#L104) · [Readiness](05-scaling-reliability/develop/app.py#L147) · [Middleware](05-scaling-reliability/develop/app.py#L72)
+
+### Exercise 5.2: Graceful shutdown — PASS một request, FAIL hai request theo README
+
+Dùng query parameter cho POST /ask và gửi SIGTERM sau 0,5 giây. Ca hai request theo README ghi nhận một HTTP 200 với đầy đủ JSON answer sau 3,068 giây. Request còn lại không nhận mã HTTP và curl báo lỗi 56, `Recv failure: Connection reset by peer`, sau 3,067 giây. `kill` và `wait` của server đều trả 0. Vì vậy chỉ một trong hai request hoàn thành.
+
+Ca một request theo CODE_LAB trả HTTP 200 sau 3,045 giây với body `{"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}`. `kill`, curl và `wait` của server đều trả 0. Log quan sát được theo thứ tự `Shutting down` → `POST /ask?question=Long%20task HTTP/1.1" 200 OK` → `Graceful shutdown initiated...` → `Shutdown complete` → `Finished server process [62898]`. Cổng 8000 hết listener sau cả hai ca.
+
+Handler async gọi mock đồng bộ chặn event loop. Kết quả ca hai request không đủ để kết luận cả hai request đã vào handler trước SIGTERM. Giữ nguyên app mẫu. Không có kết quả HTTP 503 trong lúc shutdown. [Quy trình README](05-scaling-reliability/README.md#L104) · [Handler](05-scaling-reliability/develop/app.py#L93) · [Mock](05-scaling-reliability/develop/utils/mock_llm.py#L21) · [SIGTERM và Uvicorn](05-scaling-reliability/develop/app.py#L175)
+
+### Exercise 5.3: Stateless design — PASS
+
+Nếu giữ hội thoại trong RAM, mỗi replica chỉ thấy dữ liệu do chính nó lưu. App develop chỉ giữ cờ readiness và bộ đếm request trong process, không lưu hội thoại. App production ở chế độ Redis đọc và ghi JSON theo khóa session dùng chung bằng GET và SETEX, TTL một giờ kể từ lần ghi gần nhất và tối đa 20 message. Replica khác có thể đọc cùng khóa bằng session ID. Nếu Redis ping thất bại khi import, replica dùng dictionary trong RAM cho đến khi process được khởi động lại. Mock chỉ dùng câu hỏi hiện tại để sinh câu trả lời. [Develop](05-scaling-reliability/develop/app.py#L36) · [Redis và fallback](05-scaling-reliability/production/app.py#L34) · [Lưu session](05-scaling-reliability/production/app.py#L59) · [Chat](05-scaling-reliability/production/app.py#L128)
+
+Log startup của cả ba replica ghi `Storage: Redis`. Cả mười response ở Exercise 5.4 ghi `storage: "redis"`, và Exercise 5.5 xác nhận đọc cùng session qua nhiều replica. Không thử khởi động app khi Redis mất kết nối.
+
+### Exercise 5.4: Nginx load balancing — PASS
+
+Chạy `docker compose -p k5-day14-scaling config --quiet` thành công sau khi tạo `.env.local` trống. Sau lệnh `docker compose -p k5-day14-scaling up -d --build --scale agent=3`, cả ba agent và Redis đều healthy, Nginx chạy với cổng host 8080. `redis-cli ping` trả `PONG`. Compose báo trường `version` đã lỗi thời và bỏ qua trường này.
+
+Qua Nginx, `GET /health` trả HTTP 200 với `status: ok`, `storage: redis` và `redis_connected: true`. `GET /ready` trả HTTP 200 với `ready: true`. Cả **10/10 POST /chat** trả HTTP 200. Kết quả `served_by`, header `X-Served-By` và access log của từng agent cùng cho thấy phân bổ sau:
+
+| Replica | Instance | Upstream | Số request |
+| --- | --- | --- | ---: |
+| agent-1 | instance-f0a70b | 172.20.0.3:8000 | 4 |
+| agent-2 | instance-3f190a | 172.20.0.4:8000 | 3 |
+| agent-3 | instance-a5ae15 | 172.20.0.5:8000 | 3 |
+
+Thứ tự replica là 1, 3, 2, 1, 3, 2, 1, 3, 2, 1. Cấu hình Nginx chuyển request vào upstream `agent:8000` và ghi địa chỉ upstream vào header. Kết quả khi dừng một replica nằm ở Exercise 5.5. [Compose](05-scaling-reliability/production/docker-compose.yml#L18) · [Nginx](05-scaling-reliability/production/nginx.conf#L7) · [K5](README.md#L27)
+
+### Exercise 5.5: Stateless test — PASS, failover có gián đoạn
+
+`python test_stateless.py` hoàn thành năm request trong session `d5124be4-c9d6-4f0f-9930-b152c5376b37`. Các instance lần lượt là `instance-a5ae15`, `instance-3f190a`, `instance-f0a70b`, `instance-a5ae15`, `instance-3f190a`. Script in `Total messages: 10`. Đọc lại JSON từ endpoint history xác nhận năm cặp user/assistant xen kẽ và năm câu hỏi theo đúng thứ tự: Docker, containers, Kubernetes, load balancing, Redis. Cả năm câu trả lời đều có nội dung. Kết quả xác nhận hội thoại được lưu chung qua các replica ở chế độ Redis. [Script](05-scaling-reliability/production/test_stateless.py#L41) · [History endpoint](05-scaling-reliability/production/app.py#L160)
+
+Để kiểm tra tình huống trong CODE_LAB và instructor guide, dừng riêng `k5-day14-scaling-agent-1`. Container thoát mã 0, hai agent còn lại vẫn healthy. POST tiếp vào cùng session nhận **HTTP 200** từ `instance-3f190a` với `storage: "redis"`. Lần GET history đầu tiên sau POST hết thời gian chờ của client sau 10 giây. Log Nginx ghi 499. Lần đọc lại trả **HTTP 200** qua `172.20.0.5:8000` và xác nhận **12 message**, 10 message cũ giữ nguyên và cặp user/assistant mới được thêm cuối. Ca này xác nhận tiếp tục được session sau khi dừng một agent, có gián đoạn ở một lần đọc. Không thử dừng Redis hoặc restart toàn stack. [CODE_LAB](CODE_LAB.md#L595) · [Instructor verification](INSTRUCTOR_GUIDE.md#L184)
+
+### Part 5 — Cleanup
+
+`docker compose -p k5-day14-scaling down` trả 0 và xóa các container cùng network CP4. `ps -a` của project không còn container, và không còn listener trên 8000 hoặc 8080 trong WSL. Không xóa image, volume hoặc tài nguyên lab khác. Image `k5-day14-scaling-agent:latest` vẫn còn với ID `fce7c6d4c328`. Đã xóa `.env.local` trống do CP4 tạo. Không sửa source hoặc script chấm.
+
 ## AI log
 
 - **Đã hỏi:** hỗ trợ phân tích yêu cầu, thiết kế checkpoint và test cases, review kết quả và bổ sung báo cáo Part 1 theo bằng chứng có sẵn.
@@ -510,3 +561,9 @@ Redis có 0 key trước bộ test và 0 key sau bộ test. Redis PING sau test 
 - **Đã nhận hỗ trợ.** AI hỗ trợ phân tích source và triển khai Monthly Cost Guard, đề xuất giao dịch Redis `WATCH/MULTI`, phép tính `Decimal` và các ca integration test, gồm ca hồi quy đồng thời. Codex bổ sung dẫn chiếu dòng mã và ghi lại kết quả đã xác minh.
 - **Sinh viên tự thực hiện và kiểm tra.** Sinh viên review và duyệt kế hoạch triển khai, trực tiếp chạy kiểm thử trên WSL, xác minh mã HTTP, kết quả xoay key, response và header của rate limit, log server, kết quả integration test Redis và trạng thái cleanup. Các số đo và kết quả trong Part 4 lấy từ đợt chạy đó.
 - **Các điểm chỉnh khi review.** Gọi thuật toán theo cơ chế lưu timestamp thực tế (*Sliding Window Log*), ghi rõ admin vẫn có hạn mức, và giải thích giá trị thực của `budget_remaining_usd`. Phân biệt kiểm thử đổi client với restart Redis, ghi rõ phạm vi của ca đồng thời và các ca runtime còn thiếu. Ghi nhận riêng thông báo `Aborted!` ở bản develop và log shutdown của production. Che key, token, secret và thông tin đăng nhập trong phần bằng chứng.
+
+### Part 5 — AI usage log
+
+- **Đã hỏi.** Nhờ Codex rà soát yêu cầu K5 và source CP4, sau đó chạy Exercise 5.1–5.5, dọn tài nguyên và ghi kết quả.
+- **Đã nhận hỗ trợ.** Codex chạy lệnh trong môi trường WSL, đối chiếu output và log, kiểm tra thứ tự lịch sử trước và sau khi dừng replica và ghi cả lỗi reset lẫn timeout.
+- **Sinh viên tự thực hiện và kiểm tra.** Sinh viên yêu cầu hai giai đoạn rà soát và thực thi. Các phép thử và việc đối chiếu trong mục Part 5 do Codex thực hiện. Chưa có xác nhận sinh viên chạy lại hoặc review độc lập. Kết quả ghi theo dữ liệu thực tế, và không sửa file app hay script chấm.
