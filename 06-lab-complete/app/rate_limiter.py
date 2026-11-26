@@ -1,14 +1,36 @@
-"""
-Rate limiting (tiêu chí 7).
+from hashlib import sha256
+from uuid import uuid4
 
-Yêu cầu:
-  • Mỗi API key tối đa RATE_LIMIT_PER_MINUTE request trong 60 giây (sliding window)
-  • Vượt giới hạn → HTTP 429, nên kèm header Retry-After
-  • State lưu trong Redis để mọi worker / instance dùng chung và vẫn còn sau khi
-    restart agent (script chấm sẽ restart agent để kiểm tra)
-"""
+from fastapi import HTTPException
+
+from app.config import settings
+from app.redis_client import r
+
+# Use Redis time and make pruning, checking, and recording atomic across workers.
+admit_request = r.register_script("""
+local now = redis.call('TIME')
+local ms = now[1] * 1000 + math.floor(now[2] / 1000)
+local window = 60000
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ms - window)
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then
+    local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+    if #oldest == 0 then return 60 end
+    return math.ceil((tonumber(oldest[2]) + window - ms) / 1000)
+end
+redis.call('ZADD', KEYS[1], ms, ARGV[2])
+redis.call('PEXPIRE', KEYS[1], window)
+return 0
+""")
 
 
 def check_rate_limit(key: str) -> None:
-    # TODO: gợi ý dùng Redis sorted set: ZREMRANGEBYSCORE → ZCARD → ZADD → EXPIRE
-    raise NotImplementedError("TODO: check_rate_limit")
+    digest = sha256(key.encode()).hexdigest()
+    retry_after = admit_request(
+        keys=[f"part6:rate:{digest}"], args=[settings.rate_limit_per_minute, uuid4().hex]
+    )
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )

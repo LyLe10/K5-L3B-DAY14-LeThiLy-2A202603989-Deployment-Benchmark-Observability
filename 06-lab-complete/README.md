@@ -84,18 +84,28 @@ Script tự khởi động agent của bạn, gọi API thật, build và chạy
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
+# Điền AGENT_API_KEY trong .env trước khi gọi /ask.
 
-# Chạy nhanh không cần Docker (cần Redis riêng nếu muốn test rate limit thật)
-AGENT_API_KEY=dev-key uvicorn app.main:app --reload
+# Chạy agent trên máy khi đã có Redis tại REDIS_URL.
+uvicorn app.main:app --env-file .env --workers 2
 
-# Chạy cả agent + redis
-docker compose up --build
+# Hoặc chạy cả agent và Redis bằng Compose.
+docker compose -p k5-day14-final up -d --build
 
 curl http://localhost:8000/health
+curl http://localhost:8000/ready
 curl -X POST http://localhost:8000/ask \
-     -H "X-API-Key: dev-key" -H "Content-Type: application/json" \
+     -H "X-API-Key: <local-test-key>" -H "Content-Type: application/json" \
      -d '{"question": "What is deployment?"}'
+
+docker compose -p k5-day14-final down
 ```
+
+Chạy một trong hai cách trên. Compose tự đặt `REDIS_URL=redis://redis:6379/0`.
+`PORT` mặc định là 8000. `/ask` trả 401 cho key thiếu hoặc sai, 422 cho dữ
+liệu không hợp lệ, 429 khi vượt 10 request/phút theo mặc định và 402 khi vượt
+ngân sách ngày hoặc tháng. Ngân sách mặc định là 1 USD/ngày và 10 USD/tháng
+theo UTC. Chi phí Mock LLM được ước tính từ số từ của đầu vào và đầu ra.
 
 ---
 
@@ -122,12 +132,10 @@ python check_production_ready.py --public-url https://your-app.railway.app   # t
 npm i -g @railway/cli
 railway login
 railway init
-railway variables set AGENT_API_KEY=your-secret-key
+# Tạo service Redis và đặt AGENT_API_KEY, REDIS_URL trên Railway Dashboard.
 railway up
 railway domain        # nhận public URL
 ```
-
-**Render:** push repo lên GitHub → Render Dashboard → New → Blueprint → chọn repo (Render đọc `render.yaml`) → điền secret → Deploy.
 
 Sau khi deploy: `python check_production_ready.py --public-url <URL>` và ghi URL vào `DEPLOYMENT.md` (xem [DAY14_DELIVERY_CHECKLIST.md](../DAY14_DELIVERY_CHECKLIST.md)).
 

@@ -524,6 +524,7 @@ Chạy `docker compose -p k5-day14-scaling config --quiet` thành công sau khi 
 
 Qua Nginx, `GET /health` trả HTTP 200 với `status: ok`, `storage: redis` và `redis_connected: true`. `GET /ready` trả HTTP 200 với `ready: true`. Cả **10/10 POST /chat** trả HTTP 200. Kết quả `served_by`, header `X-Served-By` và access log của từng agent cùng cho thấy phân bổ sau:
 
+
 | Replica | Instance | Upstream | Số request |
 | --- | --- | --- | ---: |
 | agent-1 | instance-f0a70b | 172.20.0.3:8000 | 4 |
@@ -541,6 +542,63 @@ Thứ tự replica là 1, 3, 2, 1, 3, 2, 1, 3, 2, 1. Cấu hình Nginx chuyển 
 ### Part 5 — Cleanup
 
 `docker compose -p k5-day14-scaling down` trả 0 và xóa các container cùng network CP4. `ps -a` của project không còn container, và không còn listener trên 8000 hoặc 8080 trong WSL. Không xóa image, volume hoặc tài nguyên lab khác. Image `k5-day14-scaling-agent:latest` vẫn còn với ID `fce7c6d4c328`. Đã xóa `.env.local` trống do CP4 tạo. Không sửa source hoặc script chấm.
+
+## Part 6 — Final Project (CP5)
+
+### Triển khai
+
+- Agent FastAPI dùng Mock LLM có sẵn. `POST /ask` nhận JSON có `question` từ 1 đến 2.000 ký tự sau khi bỏ khoảng trắng ở hai đầu, và có thể nhận `user_id`. API key được đọc từ môi trường và so sánh với header `X-API-Key`.
+- Mỗi worker dùng pool Redis kết nối khi cần và đóng pool trong FastAPI lifespan. `/health` kiểm tra process, còn `/ready` ping Redis. Uvicorn chờ request đang xử lý trước khi tắt. Log app ghi từng JSON object, kèm môi trường, mã HTTP và thời gian xử lý.
+- Rate limiter dùng cửa sổ trượt 60 giây với sorted set theo API key đã băm. Redis thực hiện kiểm tra và ghi lượt truy cập nguyên tử cho cả hai worker. Cost guard lưu tổng ngày và tháng theo UTC trong Redis, mặc định 1 USD/ngày và 10 USD/tháng. Agent kiểm tra ngân sách trước khi gọi Mock LLM và ghi chi phí nguyên tử trước khi trả câu trả lời.
+- Dockerfile hai stage dùng Python slim và chạy bằng user non-root. Compose chạy agent và Redis, cấu hình qua biến môi trường. Đã chuẩn bị `railway.toml` với Dockerfile và health check `/health` cho CP6.
+
+### Bằng chứng runtime
+
+Codex chạy kiểm thử bằng Docker Compose project `k5-day14-final` trên cổng loopback tạm và chạy checker bằng Python trong WSL. Các test key được sinh riêng trong môi trường của tiến trình kiểm thử.
+
+| Ca kiểm thử | Kết quả thực tế |
+| --- | --- |
+| Redis hoạt động | `GET /health` và `GET /ready` đều trả 200 |
+| `POST /ask` thiếu key, sai key, key đúng | 401, 401, 200. Response thành công có `question` và `answer` |
+| Thiếu `question`, câu hỏi trắng, câu hỏi 2.001 ký tự | Cả ba trả 422 |
+| Rate limit Compose, 10 request/phút | Sau một request thành công, burst 12 request đồng thời trả 9 mã 200 và 3 mã 429. Request tiếp theo trả 429 với `Retry-After: 60` |
+| Redis và restart agent | Redis giữ 10 mục trong sorted set và 2 bộ đếm chi phí dương. Sau restart, request vẫn trả 429 |
+| Dừng và bật lại Redis | `/health` vẫn trả 200, `/ready` và `/ask` trả 503. `/ready` trở lại 200 khi Redis chạy lại |
+| Budget | Lần lượt hạ giới hạn ngày và tháng xuống 0,000001 USD. Cả hai ca trả 402 |
+| Structured logging | Đọc thành công 7 dòng JSON của container Compose ở ca cuối, gồm event request và shutdown. Checker đọc được 12 dòng JSON |
+| Graceful shutdown | Checker gửi SIGTERM khi đang xử lý request, request vẫn trả 200 và process thoát mã 0. Docker stop của checker ghi `exit code 0, 1.5s`. Compose stop ghi 2.02s, mã thoát 0 |
+| Docker image | `docker image inspect` ghi **286267674 bytes / 273.01 MiB**. Checker hiển thị **273 MB**, dưới giới hạn 500 MB. Container chạy với UID 10001 |
+
+### Kết quả checker chính thức
+
+Chạy đầy đủ `python check_production_ready.py` trong `06-lab-complete/` với Docker. Mã thoát 0. Phần checklist dưới đây lấy nguyên văn từ output.
+
+```text
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 41/41 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
+```
+
+### Giới hạn và cleanup
+
+- Chi phí Mock LLM ước tính theo số từ. Khi nhiều request cùng chạy, phần chi phí thực tế được kiểm tra và ghi nguyên tử trước khi trả lời. Request có thể đã chạy Mock LLM trước khi bị từ chối ở bước ghi chi phí.
+- Lần thử đầu khi dừng Redis, client chờ tối đa 4 giây và hết thời gian chờ `/ready`. Lần chạy lại đo được HTTP 503 sau 4.03s.
+- Railway đã có cấu hình. Redis cloud, biến môi trường trên Railway và public URL sẽ được thiết lập ở CP6.
+- Đã dọn container, network và volume vô danh của Compose test CP5. Giữ image đã build, các image khác và volume có tên. Checker tự dọn tài nguyên tạm của nó.
 
 ## AI log
 
@@ -567,3 +625,9 @@ Thứ tự replica là 1, 3, 2, 1, 3, 2, 1, 3, 2, 1. Cấu hình Nginx chuyển 
 - **Đã hỏi.** Nhờ Codex rà soát yêu cầu K5 và source CP4, sau đó chạy Exercise 5.1–5.5, dọn tài nguyên và ghi kết quả.
 - **Đã nhận hỗ trợ.** Codex chạy lệnh trong môi trường WSL, đối chiếu output và log, kiểm tra thứ tự lịch sử trước và sau khi dừng replica và ghi cả lỗi reset lẫn timeout.
 - **Sinh viên tự thực hiện và kiểm tra.** Sinh viên yêu cầu hai giai đoạn rà soát và thực thi. Các phép thử và việc đối chiếu trong mục Part 5 do Codex thực hiện. Chưa có xác nhận sinh viên chạy lại hoặc review độc lập. Kết quả ghi theo dữ liệu thực tế, và không sửa file app hay script chấm.
+
+### Part 6 — AI usage log
+
+- **Đã hỏi.** Yêu cầu Codex đọc hợp đồng Part 6, hoàn thiện các TODO bắt buộc, chạy kiểm thử runtime và checker đầy đủ, rồi ghi kết quả và dọn stack.
+- **Đã nhận hỗ trợ.** Codex triển khai agent, Redis rate limiter và cost guard, cấu hình container và Railway. Codex chạy các phép thử và ghi output thực tế, gồm lần timeout khi Redis bị dừng.
+- **Sinh viên tự thực hiện và kiểm tra.** Sinh viên đưa yêu cầu và phạm vi CP5. Các thay đổi và phép thử CP5 ở trên do Codex thực hiện. Chưa có xác nhận sinh viên sửa, chạy lại hoặc kiểm tra độc lập.
