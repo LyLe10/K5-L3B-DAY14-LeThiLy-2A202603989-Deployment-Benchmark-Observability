@@ -337,6 +337,160 @@ Exit code 0. Bốn container và network `k5-day14-docker_internal` đã đượ
 
 Formatter chèn trực tiếp chuỗi do `json.dumps` tạo vào giá trị `msg` đã có dấu ngoặc kép bao quanh. Dấu ngoặc kép trước `event` kết thúc chuỗi `msg` sớm vì không được escape, khiến parser không thể đọc phần còn lại như một JSON object hợp lệ. [Production main.py dòng 16–20 và 57–64](02-docker/production/main.py#L16-L64).
 
+## Part 4: API Security
+
+### Exercise 4.1: API Key authentication
+
+- **Key được kiểm tra ở đâu?** `POST /ask` gọi dependency `verify_api_key`, đọc header `X-API-Key` qua `APIKeyHeader` và so sánh với `AGENT_API_KEY` đã đọc khi nạp module. Sau khi xác thực, handler đọc JSON và trả HTTP 422 nếu thiếu `question`. [Develop app.py dòng 35–54 và 67–80](04-api-gateway/develop/app.py#L35-L80).
+- **Điều gì xảy ra nếu sai key?** Key sai trả HTTP 403. Header thiếu hoặc rỗng trả HTTP 401. [Develop app.py dòng 39–54](04-api-gateway/develop/app.py#L39-L54).
+- **Rotate key thế nào?** Đặt giá trị mới cho `AGENT_API_KEY`, khởi động lại tiến trình để nạp cấu hình mới và cập nhật key phía client. Sau restart, key cũ bị từ chối và key mới dùng được. Hai key demo tạm thời đã được che. [Develop app.py dòng 35–54](04-api-gateway/develop/app.py#L35-L54).
+
+Sinh viên chạy Uvicorn trực tiếp tại `127.0.0.1:8000` với key từ môi trường để tránh in key qua banner của entry point `python app.py`. [Develop app.py dòng 89–93](04-api-gateway/develop/app.py#L89-L93).
+
+| ID | Trường hợp | HTTP thực tế | Kết quả |
+| --- | --- | --- | --- |
+| KEY-01 | Thiếu API key | 401 | PASS |
+| KEY-02 | API key sai | 403 | PASS |
+| KEY-03 | API key hợp lệ | 200 | PASS |
+| KEY-04 | API key rỗng | 401 | PASS |
+| KEY-05 | Key hợp lệ, thiếu `question` | 422 | PASS |
+| Rotation | Key cũ sau restart | 403 | PASS |
+| Rotation | Key mới sau restart | 200 | PASS |
+
+**7/7 PASS.** Trích mã HTTP đã xác minh từ kết quả `curl -i` (KEY-01 và KEY-03).
+
+```text
+KEY-01  401 Unauthorized
+KEY-03  200 OK
+```
+
+Shutdown hoàn tất ở cấp ứng dụng. Sau đó terminal hiện `Aborted!` và cổng đã được giải phóng. Exit code và nguyên nhân của thông báo chưa được xác định.
+
+### Exercise 4.2: JWT authentication (Advanced)
+
+Đăng nhập qua `POST /auth/token` theo hướng dẫn dành cho lớp K5. Endpoint kiểm tra thông tin đăng nhập và trả access token kiểu bearer. Token ký bằng HS256, có các claim `sub`, `role`, `iat`, `exp` và hết hạn sau 60 phút. Hai role được cấu hình là `user` và `admin`. Phiên kiểm thử tạo ngẫu nhiên `JWT_SECRET` khi khởi động server. Giá trị token, phần token trong `hint`, secret và thông tin đăng nhập đều được che. [README dòng 23–26](README.md#L23-L26), [Production app.py dòng 96–118](04-api-gateway/production/app.py#L96-L118), [auth.py dòng 22–43 và 70–75](04-api-gateway/production/auth.py#L22-L75).
+
+Client gửi `Authorization: Bearer <redacted>` với `POST /ask`. Dependency `verify_token` giải mã token bằng cùng secret và thuật toán, rồi lấy định danh cùng role cho handler. Theo source, token hết hạn có nhánh trả 401 riêng. Trường hợp hết hạn chưa được kiểm thử runtime. [Production app.py dòng 125–138](04-api-gateway/production/app.py#L125-L138), [auth.py dòng 46–67](04-api-gateway/production/auth.py#L46-L67).
+
+| ID | Trường hợp | HTTP thực tế | Kết quả |
+| --- | --- | --- | --- |
+| JWT-01 | Đăng nhập hợp lệ | 200 | PASS |
+| JWT-02 | Thông tin đăng nhập sai | 401 | PASS |
+| JWT-03 | Thiếu bearer token khi gọi `/ask` | 401 | PASS |
+| JWT-04 | Bearer token sai khi gọi `/ask` | 403 | PASS |
+| JWT-05 | Bearer token hợp lệ khi gọi `/ask` | 200 | PASS |
+
+**5/5 PASS.** Token nhận được qua đăng nhập với role `user` được dùng cho vòng gọi ở Exercise 4.3.
+
+#### Startup và shutdown của production
+
+```text
+Security layer initialized.
+Application startup complete.
+Uvicorn running on http://127.0.0.1:8000.
+```
+
+```text
+Shutting down.
+Waiting for application shutdown.
+Shutdown.
+Application shutdown complete.
+Finished server process [42752].
+```
+
+Không quan sát thấy traceback trong log shutdown này. Chưa kiểm thử xử lý SIGTERM hoặc xác minh các request đang xử lý có hoàn tất khi shutdown. [Production app.py dòng 49–53](04-api-gateway/production/app.py#L49-L53).
+
+### Exercise 4.3: Rate limiting
+
+- **Thuật toán.** Docstring gọi là *Sliding Window Counter*. Mã thực tế dùng *Sliding Window Log*: mỗi user có một `deque` lưu timestamp riêng của từng request được limiter chấp nhận. Mỗi lượt kiểm tra bỏ timestamp ngoài cửa sổ, đếm số phần tử còn lại, trả 429 nếu đã đủ hạn mức hoặc thêm timestamp mới nếu còn chỗ. Trạng thái nằm trong bộ nhớ của từng tiến trình. [rate_limiter.py dòng 1–10 và 17–71](04-api-gateway/production/rate_limiter.py#L1-L71).
+- **Hạn mức và admin.** Role `user` có 10 request mỗi 60 giây. Role `admin` đi qua limiter riêng với 100 request mỗi 60 giây và vẫn chịu giới hạn. Chưa kiểm thử runtime với admin hoặc kiểm thử việc gọi lại thành công sau khi hết thời gian chờ. [rate_limiter.py dòng 85–87](04-api-gateway/production/rate_limiter.py#L85-L87), [Production app.py dòng 137–145](04-api-gateway/production/app.py#L137-L145).
+
+#### RATE-01 — 20 request trong 2 giây
+
+| Lượt gọi | HTTP thực tế | Số lượng |
+| --- | --- | --- |
+| 1–10 | 200 OK | 10 |
+| 11–20 | 429 Too Many Requests | 10 |
+
+**RATE-01 PASS.** Trích mã HTTP và header đã xác minh từ response từ chối.
+
+```http
+429 Too Many Requests
+X-RateLimit-Limit: 10
+X-RateLimit-Remaining: 0
+Retry-After: 59
+```
+
+```json
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":59}}
+```
+
+Server ghi usage cho 10 request được chấp nhận trong RATE-01 và request JWT-05 thành công trước đó. Log không có bản ghi usage tương ứng với 10 request bị từ chối. Handler kiểm tra rate limit trước daily budget, mock LLM và ghi usage. Rate limit kiểm soát tần suất gọi, còn cost guard kiểm soát tiền vì chi phí mỗi lượt có thể khác nhau theo số token. Trong response `/ask`, trường `usage.budget_remaining_usd` thực tế chứa chi phí tích lũy từ `usage.total_cost_usd`. Endpoint `/me/usage` tính phần còn lại bằng ngân sách trừ chi phí đã dùng. [Production app.py dòng 140–168](04-api-gateway/production/app.py#L140-L168), [cost_guard.py dòng 32–36](04-api-gateway/production/cost_guard.py#L32-L36), [cost_guard.py dòng 93–124](04-api-gateway/production/cost_guard.py#L93-L124).
+
+### Exercise 4.4: Monthly Cost Guard
+
+```python
+def check_budget(user_id: str, estimated_cost: float) -> bool:
+```
+
+Mỗi user có ngân sách **10 USD/tháng**. Redis lưu tổng chi phí ước tính theo key `budget:{user_id}:{YYYY-MM}`. Tháng lấy theo giờ local của tiến trình. Đầu tháng mới dùng key riêng với số dư chi tiêu ban đầu bằng 0. Mỗi lần chấp nhận, hàm ghi chi phí ước tính ngay, làm mới TTL thành 32 ngày và trả `True`. Tổng đúng 10 USD được chấp nhận. Tổng vượt 10 USD trả `False`, giữ nguyên chi phí và thời điểm hết hạn, đồng thời tránh tạo key mới nếu đó là lần tính phí đầu tiên. Client đọc `REDIS_URL`, mặc định `redis://localhost:6379/0`. Phép tính dùng `Decimal`, chuyển đầu vào qua chuỗi trước khi cộng. Chi phí âm hoặc không hữu hạn gây `ValueError`. [monthly_cost_guard.py dòng 11–45](04-api-gateway/production/monthly_cost_guard.py#L11-L45).
+
+Lời giải tham khảo tách `GET`, kiểm tra giới hạn, `INCRBYFLOAT` và `EXPIRE`. Hai request có thể cùng đọc 7 USD và cùng duyệt khoản 3 USD, khiến cả hai phép tăng thành công và tổng lên 13 USD. `INCRBYFLOAT` nguyên tử riêng lẻ vẫn để hở khoảng giữa lúc đọc và lúc ghi. Bản triển khai dùng `WATCH` trước khi đọc, rồi `MULTI/EXEC` để ghi tổng mới cùng TTL bằng một lệnh `SET`. Khi key thay đổi trong lúc giao dịch, request xung đột phải đọc và kiểm tra lại trước khi có thể ghi. Giao dịch `WATCH/MULTI`, số học `Decimal` và test hồi quy đồng thời là các quyết định kỹ thuật bổ sung ngoài yêu cầu bắt buộc của lab. [Lời giải Exercise 4.4 trong CODE_LAB.md dòng 429–448](CODE_LAB.md#L429-L448), [monthly_cost_guard.py dòng 20–50](04-api-gateway/production/monthly_cost_guard.py#L20-L50), [test_monthly_cost_guard.py dòng 105–118](04-api-gateway/production/test_monthly_cost_guard.py#L105-L118).
+
+#### Tệp triển khai
+
+- `04-api-gateway/production/monthly_cost_guard.py` triển khai hàm kiểm tra và ghi chi phí. [Mã nguồn dòng 20–50](04-api-gateway/production/monthly_cost_guard.py#L20-L50).
+- `04-api-gateway/production/test_monthly_cost_guard.py` chứa 10 integration test dùng Redis thật. [Bộ test dòng 16–118](04-api-gateway/production/test_monthly_cost_guard.py#L16-L118).
+- `04-api-gateway/production/requirements.txt` thêm `redis==5.1.0`. [requirements.txt dòng 5](04-api-gateway/production/requirements.txt#L5).
+
+#### Môi trường và kết quả kiểm thử
+
+Sinh viên chạy trên WSL với Python 3.12.3, Redis server 7.4.12 và Redis Python client 5.1.0. Redis chạy từ Docker image `redis:7-alpine` tại `redis://127.0.0.1:16379/0`. `pip check` trả `No broken requirements found.` và PING từ Python tới Redis **PASS**.
+
+Lệnh tái lập từ thư mục gốc của repo, với Redis và môi trường Python như trên.
+
+```bash
+REDIS_URL=redis://127.0.0.1:16379/0 \
+  "$HOME/.venvs/day14-cp3-production/bin/python" \
+  -m unittest discover \
+  -s 04-api-gateway/production \
+  -p 'test_monthly_cost_guard.py' -v
+```
+
+| ID | Kiểm tra | Kết quả |
+| --- | --- | --- |
+| COST-01 | Ghi khoản phí đầu tiên | PASS |
+| COST-02 | Cộng dồn chi phí | PASS |
+| COST-03 | Chấp nhận tổng đúng 10 USD | PASS |
+| COST-04 | Từ chối vượt ngân sách, giữ nguyên chi phí | PASS |
+| COST-05 | Từ chối khoản đầu tiên, không tạo key | PASS |
+| COST-06 | Ngân sách độc lập giữa các user | PASS |
+| COST-07 | Chuyển tháng bằng giá trị tháng giả lập, dùng key mới | PASS |
+| COST-08 | Tạo TTL, giữ thời điểm hết hạn khi từ chối, làm mới TTL khi chấp nhận | PASS |
+| COST-09 | Đọc lại chi phí bằng client mới sau khi đóng client ghi | PASS |
+| COST-10 | Hai luồng cạnh tranh cho khoản còn lại, chỉ một khoản được chấp nhận | PASS |
+
+```text
+Ran 10 tests in 0.075s
+
+OK
+Integration test exit code: 0
+```
+
+Redis có 0 key trước bộ test và 0 key sau bộ test. Redis PING sau test trả `PONG`. [Thiết lập và dọn key của bộ test, dòng 16–32](04-api-gateway/production/test_monthly_cost_guard.py#L16-L32).
+
+#### Giới hạn và phạm vi
+
+- Monthly Cost Guard là triển khai độc lập cho Exercise 4.4, chưa tích hợp vào `/ask`. Daily `CostGuard` hiện có giữ nguyên. [Production app.py dòng 140–153](04-api-gateway/production/app.py#L140-L153), [cost_guard.py dòng 39–51 và 127–128](04-api-gateway/production/cost_guard.py#L39-L128).
+- Đã kiểm tra dữ liệu tồn tại khi đổi kết nối client. Chưa kiểm tra độ bền dữ liệu khi khởi động lại Redis server. [COST-09 dòng 97–103](04-api-gateway/production/test_monthly_cost_guard.py#L97-L103).
+- Bộ 10 test chưa có ca runtime riêng cho chi phí âm và không hữu hạn. COST-10 là test hồi quy với hai luồng, chưa phải stress test. Thời gian chạy 0.075 giây của bộ test không đo latency của API. [Kiểm tra đầu vào, dòng 20–24](04-api-gateway/production/monthly_cost_guard.py#L20-L24), [COST-10 dòng 105–118](04-api-gateway/production/test_monthly_cost_guard.py#L105-L118).
+- Chi phí ước tính được ghi ngay khi chấp nhận. Đối soát với chi phí thực tế và idempotency nằm ngoài phạm vi exercise. Mọi phản hồi LLM và chi phí token trong các lượt kiểm thử đều là giá trị mock. [monthly_cost_guard.py dòng 38–45](04-api-gateway/production/monthly_cost_guard.py#L38-L45), [Production app.py dòng 147–160](04-api-gateway/production/app.py#L147-L160).
+
+### Part 4 — Cleanup
+
+`docker stop k5-day14-cp3-redis` trả exit code 0 và container được xóa tự động. Không còn container Docker đang chạy. Các cổng 8000, 6379 và 16379 đều trống trong WSL. Image `redis:7-alpine` vẫn còn với ID `7f7d30b7fdd0`. Không chủ động xóa volume nào đã có của lab. Lần chạy `git diff --check` trong đợt cleanup trả exit code 0.
+
+
 ## AI log
 
 - **Đã hỏi:** hỗ trợ phân tích yêu cầu, thiết kế checkpoint và test cases, review kết quả và bổ sung báo cáo Part 1 theo bằng chứng có sẵn.
@@ -349,3 +503,10 @@ Formatter chèn trực tiếp chuỗi do `json.dumps` tạo vào giá trị `msg
 - **Đã hỏi và nhận hỗ trợ.** ChatGPT hỗ trợ lập kế hoạch checkpoint, chuẩn bị lệnh, diễn giải kết quả kiểm thử và xác định tiêu chí nghiệm thu. Codex đối chiếu source ở chế độ chỉ đọc và hỗ trợ viết báo cáo từ bằng chứng CP2 đã cung cấp.
 - **Sinh viên tự thực hiện và kiểm tra.** Sinh viên trực tiếp chạy các lệnh Docker và curl, kiểm tra log, trạng thái container và cleanup. Sinh viên đối chiếu mã HTTP và payload với kết quả mong đợi, kiểm tra log Nginx và Agent để xác nhận đường đi request, rồi đối chiếu trạng thái service, cổng và tài nguyên Docker còn lại với kết quả cleanup dự kiến.
 - **Các điểm được làm rõ khi viết báo cáo.** Tính mức giảm từ số byte chính xác và ghi disk usage, content size trên các dòng riêng trong bảng. Phân biệt cache của pip với Docker layer cache và trạng thái `unhealthy` với hành vi tự restart. Đối chiếu `depends_on` với handler để giới hạn kết luận về luồng dữ liệu. Kiểm tra formatter và dòng log thực tế để xác định lỗi escape dấu ngoặc kép trong `msg`.
+
+### Part 4 — AI usage log
+
+- **Đã hỏi.** Nhờ AI đọc yêu cầu CP3 và source gateway, giải thích luồng API key, JWT, thuật toán rate limit, phân tích race condition trong lời giải Redis và hỗ trợ lập kế hoạch triển khai, kiểm thử Monthly Cost Guard. Sau khi có kết quả runtime, nhờ Codex viết Part 4 và đối chiếu từng kết luận với source và bằng chứng đã cung cấp.
+- **Đã nhận hỗ trợ.** AI hỗ trợ phân tích source và triển khai Monthly Cost Guard, đề xuất giao dịch Redis `WATCH/MULTI`, phép tính `Decimal` và các ca integration test, gồm ca hồi quy đồng thời. Codex bổ sung dẫn chiếu dòng mã và ghi lại kết quả đã xác minh.
+- **Sinh viên tự thực hiện và kiểm tra.** Sinh viên review và duyệt kế hoạch triển khai, trực tiếp chạy kiểm thử trên WSL, xác minh mã HTTP, kết quả xoay key, response và header của rate limit, log server, kết quả integration test Redis và trạng thái cleanup. Các số đo và kết quả trong Part 4 lấy từ đợt chạy đó.
+- **Các điểm chỉnh khi review.** Gọi thuật toán theo cơ chế lưu timestamp thực tế (*Sliding Window Log*), ghi rõ admin vẫn có hạn mức, và giải thích giá trị thực của `budget_remaining_usd`. Phân biệt kiểm thử đổi client với restart Redis, ghi rõ phạm vi của ca đồng thời và các ca runtime còn thiếu. Ghi nhận riêng thông báo `Aborted!` ở bản develop và log shutdown của production. Che key, token, secret và thông tin đăng nhập trong phần bằng chứng.
