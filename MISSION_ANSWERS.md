@@ -2035,4 +2035,11 @@ Các kết quả PASS, FAIL, WARNING và những trường hợp chưa được 
 - **Yêu cầu hỗ trợ:** Thực hiện Exercise 7.1–7.3 theo yêu cầu K5. Đo metrics và kiểm thử histogram mới, chạy load test và eval local, sửa knowledge base theo bằng chứng, thêm CI quality gate và lưu kết quả nghiệm thu.
 - **Kết quả hỗ trợ từ AI:** Codex đối chiếu hướng dẫn với mã nguồn, bổ sung histogram, chạy kiểm thử trên hai agent mock, lưu JSON gốc do các script xuất ra và tổng hợp kết quả trong [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md). Dựa trên `missing_keywords` của v2, Codex thêm hai mục kiến thức về JWT và Kubernetes HPA rồi chạy lại eval.
 - **Công việc trực tiếp thực hiện:** Tôi xác định phạm vi CP7, tiêu chí nghiệm thu và các ràng buộc thực hiện. Codex thực hiện thay đổi mã nguồn, các phép đo local và tổng hợp bằng chứng. Tôi chưa xác minh độc lập toàn bộ kết quả.
-- **Điều chỉnh sau review:** Dùng đủ ba mức slow rate theo CHECKPOINTS.md và lưu JSON tại `reports/` ở gốc theo SUBMISSION.md. Giữ ngưỡng SLO mặc định và kết quả exit 1 của các lượt vi phạm. Kiểm tra gate 85% bằng lệnh local trên v2 đã sửa và v1 để quan sát cả exit 0 và exit 1. Trạng thái GitHub Actions chưa được xác minh. Phần CP8 để pending.
+- **Điều chỉnh sau review:** Dùng đủ ba mức slow rate theo CHECKPOINTS.md và lưu JSON tại `reports/` ở gốc theo SUBMISSION.md. Giữ ngưỡng SLO mặc định và kết quả exit 1 của các lượt vi phạm. Kiểm tra gate 85% bằng lệnh local trên v2 đã sửa và v1 để quan sát cả exit 0 và exit 1. Trạng thái GitHub Actions chưa được xác minh.
+
+### Part 7 — Observability và bàn giao (CP8)
+
+- **Yêu cầu hỗ trợ:** Thực hiện Exercise 7.4–7.7, thu thập CSV Locust và bằng chứng Prometheus, Grafana, Jaeger từ project Compose `k5-day14-observability`, rồi bàn giao để học viên chụp bốn ảnh.
+- **Kết quả hỗ trợ từ AI:** Codex chạy stack local, kiểm tra targets và metrics, đo Locust ở scale 1 và 3, lưu CSV gốc, đối chiếu trace thật với log JSON, chạy `promtool` và hai thí nghiệm chaos. Codex tổng hợp số đo và đường dẫn màn hình trong [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md).
+- **Công việc trực tiếp thực hiện:** Tôi xác định tải, tiêu chí nghiệm thu và yêu cầu giữ stack hoạt động. Sau khi nhận bàn giao, tôi trực tiếp mở Grafana, Jaeger và Prometheus, kiểm tra giao diện và lưu đủ bốn ảnh CP8.
+- **Điều chỉnh khi kiểm tra:** Sửa `PYTHONUSERBASE` trong Dockerfile production của observability để Uvicorn import được dependency. Loại lượt đo mà Compose tự tăng replica, sau đó dùng `--no-deps` và đối chiếu số target Agent ở mỗi lượt. Giữ ngưỡng và thời gian chờ gốc của alert rules.
